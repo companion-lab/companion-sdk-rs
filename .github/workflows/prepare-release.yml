@@ -1,0 +1,105 @@
+# One-click release for companion-plugin-sdk:
+#
+#   Actions -> Prepare release -> run workflow
+#     version: "0.4.0"    (explicit target version, optional)
+#     bump:    patch      (used when version is empty; default)
+#
+# Bumps Cargo.toml, syncs Cargo.lock via cargo check, commits
+# "chore: release vX.Y.Z", tags v X.Y.Z, pushes both, then calls the Release
+# workflow against the bumped commit to publish to crates.io and create the
+# GitHub release. Tag/version mismatches are impossible because the manifest
+# is set from the requested version, not the other way.
+#
+# Note: tags pushed with GITHUB_TOKEN don't retrigger workflows, so publish
+# happens here via the reusable Release workflow (no double publish).
+
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Target version, e.g. 0.4.0 (overrides bump)"
+        required: false
+        type: string
+      bump:
+        description: "Bump applied when no explicit version is given"
+        required: false
+        default: patch
+        type: choice
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.push.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Bump Cargo.toml version
+        id: version
+        env:
+          VERSION_IN: ${{ inputs.version }}
+          BUMP: ${{ inputs.bump || 'patch' }}
+        run: |
+          if [ -n "$VERSION_IN" ]; then
+            node scripts/prepare-release.mjs --set "$VERSION_IN"
+          else
+            node scripts/prepare-release.mjs --bump "$BUMP"
+          fi
+          VERSION=$(cargo metadata --quiet --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Fail fast if version or tag already taken
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          CRATE=companion-plugin-sdk
+          if curl -sf -A "companion-prepare-release (github actions)" \
+              "https://crates.io/api/v1/crates/$CRATE" \
+              | grep -q "\"num\":\"$VERSION\""; then
+            echo "::error::$CRATE@$VERSION is already published on crates.io"; exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::error::tag v$VERSION already exists on origin"; exit 1
+          fi
+
+      # Also rewrites Cargo.lock with the new version (verified locally).
+      - run: cargo check
+
+      - name: Commit, tag, and push
+        id: push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release v$VERSION"
+          git push origin HEAD:"$GITHUB_REF_NAME"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+  publish:
+    needs: bump
+    uses: ./.github/workflows/release.yml
+    with:
+      ref: ${{ needs.bump.outputs.sha }}
+      tag: v${{ needs.bump.outputs.version }}
+      create_release: true
+    secrets: inherit

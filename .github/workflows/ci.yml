@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: fmt / clippy / test (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  msrv:
+    name: build on MSRV (rust-version)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Keeps the declared MSRV honest: the crate must actually build on the
+      # `rust-version` claimed in Cargo.toml (const is_null() needs >= 1.84).
+      - name: Install MSRV toolchain
+        run: |
+          MSRV=$(cargo metadata --quiet --no-deps --format-version 1 | jq -r '.packages[0].rust_version')
+          if [ -z "$MSRV" ] || [ "$MSRV" = "null" ]; then
+            echo "::error::no rust-version declared in Cargo.toml"; exit 1
+          fi
+          rustup toolchain install "$MSRV" --profile minimal
+          echo "MSRV=$MSRV" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo "+$MSRV" build

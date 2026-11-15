@@ -30,9 +30,7 @@
 
 mod abi;
 
-pub use abi::{
-    HostBridge, PluginVTable, RawBuffer, ABI_VERSION, LOG_ERROR, LOG_INFO, LOG_WARN,
-};
+pub use abi::{HostBridge, PluginVTable, RawBuffer, ABI_VERSION, LOG_ERROR, LOG_INFO, LOG_WARN};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

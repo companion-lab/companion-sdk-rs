@@ -69,19 +69,16 @@ pub struct HostBridge {
         payload: *const u8,
         payload_len: usize,
     ),
-    pub log:
-        extern "C" fn(user: *mut c_void, level: u32, msg: *const u8, msg_len: usize),
+    pub log: extern "C" fn(user: *mut c_void, level: u32, msg: *const u8, msg_len: usize),
     /// v2: Write the plugin's writable data directory (UTF-8 path, no NUL)
     /// into `out`. Returns the number of bytes the path needs. When `out` is
     /// null or `out_cap` is smaller than that, nothing is copied — call again
     /// with a big enough buffer. Returns 0 if the host has no data dir.
-    pub data_dir:
-        extern "C" fn(user: *mut c_void, out: *mut u8, out_cap: usize) -> usize,
+    pub data_dir: extern "C" fn(user: *mut c_void, out: *mut u8, out_cap: usize) -> usize,
     /// v2: Same protocol as `data_dir`, but for the read-only plugin package
     /// directory (holds `manifest.json`, the frontend bundle, the backend
     /// library, and any bundled `assets/`).
-    pub plugin_dir:
-        extern "C" fn(user: *mut c_void, out: *mut u8, out_cap: usize) -> usize,
+    pub plugin_dir: extern "C" fn(user: *mut c_void, out: *mut u8, out_cap: usize) -> usize,
 }
 
 /// The plugin side of the ABI, produced by `export_plugin!`.
