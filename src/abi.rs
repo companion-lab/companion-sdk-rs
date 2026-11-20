@@ -18,7 +18,11 @@ use std::ffi::c_void;
 ///
 /// v2: added `data_dir` / `plugin_dir` path callbacks to [`HostBridge`]
 /// (writable per-plugin data dir; read-only package dir for assets).
-pub const ABI_VERSION: u32 = 2;
+///
+/// v3: added `host_call` / `free_bridge_buffer` callbacks to [`HostBridge`] —
+/// the backend can invoke host capabilities (plugin management, window
+/// control, app config, global shortcuts) gated by manifest permissions.
+pub const ABI_VERSION: u32 = 3;
 
 /// A byte buffer handed across the FFI boundary. Ownership transfers: the
 /// receiver must free it through the original owner's `free_buffer`.
@@ -79,6 +83,26 @@ pub struct HostBridge {
     /// directory (holds `manifest.json`, the frontend bundle, the backend
     /// library, and any bundled `assets/`).
     pub plugin_dir: extern "C" fn(user: *mut c_void, out: *mut u8, out_cap: usize) -> usize,
+    /// v3: Invoke a host capability method. `capability` and `method` are
+    /// UTF-8 (no NUL), `payload` is a UTF-8 JSON document (null/empty = no
+    /// args). The host returns a JSON envelope
+    /// `{"ok":true,"value":...}` / `{"ok":false,"error":"..."}` allocated by
+    /// the host — free it with [`HostBridge::free_bridge_buffer`]. The host
+    /// gates every capability behind the manifest's `permissions` list and
+    /// rejects unknown capability/method names with an error envelope.
+    pub host_call: extern "C" fn(
+        user: *mut c_void,
+        capability: *const u8,
+        capability_len: usize,
+        method: *const u8,
+        method_len: usize,
+        payload: *const u8,
+        payload_len: usize,
+    ) -> RawBuffer,
+    /// v3: Free a `RawBuffer` the host previously returned from
+    /// `host_call`. The plugin must not free it through its own
+    /// `companion_plugin_free_buffer` — the allocation belongs to the host.
+    pub free_bridge_buffer: extern "C" fn(user: *mut c_void, buffer: RawBuffer),
 }
 
 /// The plugin side of the ABI, produced by `export_plugin!`.
@@ -102,4 +126,43 @@ pub struct PluginVTable {
     pub destroy: extern "C" fn(instance: *mut c_void),
     /// Free a buffer the plugin previously returned.
     pub free_buffer: extern "C" fn(buffer: RawBuffer),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abi_version_is_3() {
+        assert_eq!(ABI_VERSION, 3);
+    }
+
+    #[test]
+    fn log_levels_are_distinct_and_ordered() {
+        assert_eq!(LOG_INFO, 0);
+        assert_eq!(LOG_WARN, 1);
+        assert_eq!(LOG_ERROR, 2);
+    }
+
+    #[test]
+    fn null_buffer_is_null() {
+        assert!(RawBuffer::NULL.is_null());
+        assert_eq!(RawBuffer::NULL.len, 0);
+        assert_eq!(RawBuffer::NULL.cap, 0);
+    }
+
+    #[test]
+    fn from_vec_preserves_contents_and_can_be_reclaimed() {
+        // Ownership transfers to the buffer; the receiver frees it through
+        // the plugin's free_buffer, which rebuilds the Vec exactly the way
+        // done here. Round-tripping proves ptr/len/cap were captured
+        // faithfully and the layout is what the FFI side expects.
+        let v = b"hello world".to_vec();
+        let buf = RawBuffer::from_vec(v);
+        assert!(!buf.is_null());
+        assert_eq!(buf.len, 11);
+        assert!(buf.cap >= 11);
+        let reclaimed = unsafe { Vec::from_raw_parts(buf.ptr, buf.len, buf.cap) };
+        assert_eq!(reclaimed, b"hello world");
+    }
 }

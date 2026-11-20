@@ -51,7 +51,7 @@ plugin's `manifest.json`:
   "name": "Notes",
   "version": "0.1.0",
   "description": "Example plugin.",
-  "abi": 2,
+  "abi": 3,
   "permissions": ["storage", "events"],
   "backend": { "library": "libnotes_backend.dylib" }
 }
@@ -79,6 +79,53 @@ launch.
   (`companion_plugin_abi_version` / `_create` / `_handle` / `_tools` /
   `_destroy` / `_free_buffer`).
 
+## Controlling the host app (ABI 3)
+
+`PluginCtx::host_call` reaches host capabilities; the host enforces one
+manifest permission per capability and errors on unknown names:
+
+| Surface | Permission | What it does |
+| --- | --- | --- |
+| `ctx.plugins()` | `"plugins"` | `list()` all installed plugins with enabled state; `info(…)`; `set_enabled(id, bool)`; `is_enabled(id)` — the calling plugin cannot toggle itself |
+| `ctx.window()` | `"window"` | size/position (absolute or corner `snap_to_anchor`), `set_always_on_top`, `set_click_through`, `set_follow_spaces` of the companion window — runtime-only, user prefs win at next startup |
+| `ctx.app()` | `"app"` | `config()` — the resolved `tauri.conf.json` as JSON (read-only); `name()`; `version()` |
+| `ctx.shortcuts()` | `"shortcuts"` | `register`/`unregister`/`is_registered` global shortcuts; a press emits `plugin:{id}:shortcut` with `{"shortcut": …}` to every webview |
+
+```rust
+impl Plugin for Notes {
+    fn init(&mut self, ctx: PluginCtx) -> Result<(), String> {
+        if let Ok(cfg) = ctx.app().config() {
+            ctx.info(&format!("host app config has {} keys", cfg.as_object().map_or(0, |m| m.len())));
+        }
+        let _ = ctx.shortcuts().register("CmdOrCtrl+Shift+N");
+        Ok(())
+    }
+
+    fn handle(&mut self, method: &str, payload: Value) -> Result<Value, String> {
+        match method {
+            "enabled-plugins" => {
+                let list = self.ctx.plugins().list()?;
+                Ok(serde_json::to_value(list).unwrap())
+            }
+            _ => Err(format!("unknown method: {method}")),
+        }
+    }
+}
+```
+
+Notes:
+
+- A missing permission surfaces as `Err("permission \"…\" not granted")` on
+  the first call, not on construction.
+- `ctx.plugins()` calls during backend *startup* (`init` at app boot) return
+  an error — the plugin host is not ready until discovery finishes. Window,
+  app, and shortcuts calls work from `init` on.
+- Window changes are runtime-only: the user's General-tab preferences win at
+  the next startup.
+- Shortcut presses are delivered to webviews (`plugin:{id}:shortcut`), not
+  back into the backend; a plugin reacts from its frontend, which can call
+  the backend.
+
 ## Concurrency & lifetime
 
 `handle` calls are serialized by the host (one call at a time per backend), so
@@ -90,10 +137,11 @@ errors every call instead of crashing.
 
 ## ABI versioning
 
-`ABI_VERSION` (currently **2** — v2 added the `data_dir`/`plugin_dir` path
-callbacks) is checked by the host before anything else; plugins built against
-a different ABI are rejected at load time. Bump the crate version whenever
-`ABI_VERSION` changes and rebuild your plugin against the matching release.
+`ABI_VERSION` (currently **3** — v2 added the `data_dir`/`plugin_dir` path
+callbacks, v3 added the `host_call` capability bridge) is checked by the host
+before anything else; plugins built against a different ABI are rejected at
+load time. Bump the crate version whenever `ABI_VERSION` changes and rebuild
+your plugin against the matching release.
 
 ## License
 
