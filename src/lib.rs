@@ -348,32 +348,58 @@ mod tests {
     // -- bridge fixtures -----------------------------------------------------
     //
     // Callbacks are plain extern "C" fns (the bridge can't capture closures),
-    // so the fixtures carry their state in statics. Tests are effectively
-    // single-threaded around each call site.
+    // so the recording fixture carries its state through the `user` pointer:
+    // each test leaks a fresh CallFixture and reclaims it when done. Shared
+    // statics would race across cargo's parallel test threads.
 
-    static EMITTED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-    static LOGGED: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+    struct CallFixture {
+        emitted: Mutex<Vec<(String, String)>>,
+        logged: Mutex<Vec<(u32, String)>>,
+    }
+
+    /// Leak a fresh fixture for one test; reclaim with `reclaim_fixture`
+    /// after snapshotting (same pattern as DirFixture/HostCallFixture).
+    fn leak_fixture() -> *mut c_void {
+        Box::into_raw(Box::new(CallFixture {
+            emitted: Mutex::new(Vec::new()),
+            logged: Mutex::new(Vec::new()),
+        })) as *mut c_void
+    }
+
+    /// SAFETY: `fx` must be a pointer returned by `leak_fixture`, reclaimed
+    /// exactly once while no callback can still be running.
+    unsafe fn reclaim_fixture(fx: *mut c_void) {
+        drop(Box::from_raw(fx as *mut CallFixture));
+    }
 
     extern "C" fn rec_emit(
-        _user: *mut c_void,
+        user: *mut c_void,
         event: *const u8,
         event_len: usize,
         payload: *const u8,
         payload_len: usize,
     ) {
+        if user.is_null() {
+            return; // no fixture: nothing to record into
+        }
+        let fx = unsafe { &*(user as *const CallFixture) };
         let event =
             unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(event, event_len)) };
         let payload =
             unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(payload, payload_len)) };
-        EMITTED
+        fx.emitted
             .lock()
             .unwrap()
             .push((event.into_owned(), payload.into_owned()));
     }
 
-    extern "C" fn rec_log(_user: *mut c_void, level: u32, msg: *const u8, msg_len: usize) {
+    extern "C" fn rec_log(user: *mut c_void, level: u32, msg: *const u8, msg_len: usize) {
+        if user.is_null() {
+            return; // no fixture: nothing to record into
+        }
+        let fx = unsafe { &*(user as *const CallFixture) };
         let msg = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(msg, msg_len)) };
-        LOGGED.lock().unwrap().push((level, msg.into_owned()));
+        fx.logged.lock().unwrap().push((level, msg.into_owned()));
     }
 
     extern "C" fn nop_emit(
@@ -504,12 +530,18 @@ mod tests {
 
     #[test]
     fn ctx_log_forwards_with_the_right_level() {
-        LOGGED.lock().unwrap().clear();
-        let ctx = PluginCtx::from_bridge(bridge_with(live_user(), true));
+        let fx = leak_fixture();
+        let ctx = PluginCtx::from_bridge(bridge_with(fx, true));
         ctx.info("starting");
         ctx.warn("hmm");
         ctx.error("bad");
-        let logged = LOGGED.lock().unwrap().clone();
+        // Snapshot while the fixture is still alive, then reclaim it.
+        let logged = unsafe { &*(fx as *const CallFixture) }
+            .logged
+            .lock()
+            .unwrap()
+            .clone();
+        unsafe { reclaim_fixture(fx) };
         assert_eq!(
             logged,
             vec![
@@ -522,10 +554,15 @@ mod tests {
 
     #[test]
     fn ctx_emit_serializes_the_payload_json() {
-        EMITTED.lock().unwrap().clear();
-        let ctx = PluginCtx::from_bridge(bridge_with(live_user(), true));
+        let fx = leak_fixture();
+        let ctx = PluginCtx::from_bridge(bridge_with(fx, true));
         ctx.emit("state", &json!({ "ok": true }));
-        let emitted = EMITTED.lock().unwrap().clone();
+        let emitted = unsafe { &*(fx as *const CallFixture) }
+            .emitted
+            .lock()
+            .unwrap()
+            .clone();
+        unsafe { reclaim_fixture(fx) };
         assert_eq!(
             emitted,
             vec![("state".to_string(), r#"{"ok":true}"#.to_string())]
@@ -535,12 +572,13 @@ mod tests {
     #[test]
     fn ctx_calls_with_null_user_are_silent_noops() {
         // Plugins built against hosts that never handed a bridge must not
-        // crash on log/emit.
+        // crash on log/emit: PluginCtx skips the callbacks entirely when the
+        // bridge user is null (and rec_log/rec_emit ignore null fixtures).
         let ctx = PluginCtx::from_bridge(bridge_with(std::ptr::null_mut(), true));
         ctx.info("ignored");
         ctx.emit("ignored", &json!(null));
-        assert!(LOGGED.lock().unwrap().is_empty());
-        assert!(EMITTED.lock().unwrap().is_empty());
+        ctx.warn("also ignored");
+        ctx.emit("also ignored", &json!({}));
     }
 
     // -- read_dir_path: the two-pass dir protocol --------------------------------
