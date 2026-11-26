@@ -4,8 +4,11 @@
 //! (`PluginCtx::host_call`): a capability name, a method, and a JSON
 //! payload. The host gates each capability behind a manifest permission
 //! (`plugins` → `"plugins"`, `window` → `"window"`, `app` → `"app"`,
-//! `shortcuts` → `"shortcuts"`) and errors otherwise, so these methods
-//! return `Err` rather than being absent when the permission is missing.
+//! `shortcuts` → `"shortcuts"`, `capabilities` → `"capabilities"`) and
+//! errors otherwise, so these methods return `Err` rather than being absent
+//! when the permission is missing.
+
+use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
@@ -267,6 +270,52 @@ impl<'a> ShortcutsSurface<'a> {
     }
 }
 
+/// Plugin-to-plugin capabilities. Publish a named capability for other
+/// plugins' backends, call one another plugin published, or list what is
+/// available. Requires the `"capabilities"` manifest permission.
+///
+/// Names are namespaced by this plugin's id (`"<plugin-id>.<name>"` — the
+/// host enforces the prefix, so a plugin cannot spoof another's capability).
+/// A publishing backend answers calls as
+/// `handle("capability_call", {"capability", "method", "payload"})`.
+#[derive(Debug, Clone, Copy)]
+pub struct CapabilitiesSurface<'a> {
+    ctx: &'a PluginCtx,
+}
+
+impl<'a> CapabilitiesSurface<'a> {
+    /// Publish a capability under `"<plugin-id>.<name>"`. Call this from
+    /// `init`: init runs on every plugin (re)enable, so the registration is
+    /// refreshed whenever the backend loads.
+    pub fn provide(&self, name: &str) -> Result<(), String> {
+        self.ctx
+            .host_call("capabilities", "provide", &json!({ "name": name }))
+            .map(|_| ())
+    }
+
+    /// Call a method on a capability another plugin's backend published. The
+    /// target receives `handle("capability_call", {"capability": name,
+    /// "method": method, "payload": payload})`.
+    ///
+    /// No cycles: calling into a plugin that is itself mid-`handle` blocks
+    /// on that backend's mutex (calls are serialized per backend) until the
+    /// host's lock valve fails the call.
+    pub fn call(&self, name: &str, method: &str, payload: &Value) -> Result<Value, String> {
+        self.ctx.host_call(
+            "capabilities",
+            "call",
+            &json!({ "name": name, "method": method, "payload": payload }),
+        )
+    }
+
+    /// Every backend-published capability: capability name → owning plugin id.
+    pub fn list(&self) -> Result<BTreeMap<String, String>, String> {
+        self.ctx
+            .host_call("capabilities", "list", &Value::Null)
+            .and_then(parse_into)
+    }
+}
+
 impl PluginCtx {
     /// Generic host capability call — the transport under every typed
     /// surface. Prefer the surfaces; this raw form only exists for
@@ -301,6 +350,11 @@ impl PluginCtx {
 
     pub fn shortcuts(&self) -> ShortcutsSurface<'_> {
         ShortcutsSurface { ctx: self }
+    }
+
+    /// Plugin-to-plugin capabilities (see [`CapabilitiesSurface`]).
+    pub fn capabilities(&self) -> CapabilitiesSurface<'_> {
+        CapabilitiesSurface { ctx: self }
     }
 
     fn host_call_inner(

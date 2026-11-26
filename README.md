@@ -90,6 +90,7 @@ manifest permission per capability and errors on unknown names:
 | `ctx.window()` | `"window"` | size/position (absolute or corner `snap_to_anchor`), `set_always_on_top`, `set_click_through`, `set_follow_spaces` of the companion window — runtime-only, user prefs win at next startup |
 | `ctx.app()` | `"app"` | `config()` — the resolved `tauri.conf.json` as JSON (read-only); `name()`; `version()` |
 | `ctx.shortcuts()` | `"shortcuts"` | `register`/`unregister`/`is_registered` global shortcuts; a press emits `plugin:{id}:shortcut` with `{"shortcut": …}` to every webview |
+| `ctx.capabilities()` | `"capabilities"` | plugin-to-plugin capabilities — see below |
 
 ```rust
 impl Plugin for Notes {
@@ -125,6 +126,59 @@ Notes:
 - Shortcut presses are delivered to webviews (`plugin:{id}:shortcut`), not
   back into the backend; a plugin reacts from its frontend, which can call
   the backend.
+
+### Plugin-to-plugin capabilities
+
+`ctx.capabilities()` lets backends share functionality directly. Publish a
+named capability in `init` (init runs on every plugin enable, so the
+registration is refreshed whenever the backend loads); other backends call
+it through the host:
+
+```rust
+impl Plugin for Encryptor {
+    fn init(&mut self, ctx: PluginCtx) -> Result<(), String> {
+        // Names are namespaced by this plugin's id — the host enforces the
+        // "encryptor." prefix, so a plugin cannot spoof another's capability.
+        ctx.capabilities().provide("encryptor.seal")?;
+        Ok(())
+    }
+
+    fn handle(&mut self, method: &str, payload: Value) -> Result<Value, String> {
+        match method {
+            // A capability consumer arrives here with the capability,
+            // method and payload it was called with.
+            "capability_call" => {
+                let cap = payload["capability"].as_str().unwrap_or_default();
+                let m = payload["method"].as_str().unwrap_or_default();
+                match (cap, m) {
+                    ("encryptor.seal", "seal") => { /* ... */ }
+                    _ => Err(format!("unknown capability method: {cap}/{m}")),
+                }
+            }
+            _ => Err(format!("unknown method: {method}")),
+        }
+    }
+}
+
+// Somewhere else, another backend calls it:
+let sealed = ctx.capabilities().call("encryptor.seal", "seal", &json!({ "text": "hi" }))?;
+```
+
+Notes:
+
+- Requires the `"capabilities"` manifest permission on **both** sides
+  (publisher and caller).
+- `provide` and `list` work during startup `init`; `call` needs the plugin
+  host to be ready and errors until discovery finishes.
+- No capability-call cycles: calling into a plugin that is itself
+  mid-`handle` blocks on that backend's mutex (calls are serialized per
+  backend) until the host's lock valve fails the call.
+- Disabling or uninstalling a plugin drops its published capabilities; its
+  init re-provides them on the next enable.
+- Frontends consume capabilities too: `ctx.capabilities.consume(name)` in
+  the webview sees frontend-published providers, and
+  `ctx.capabilities.callCapability(name, method, payload)` reaches
+  backend-published ones through the host (see the JS SDK README).
 
 ## Concurrency & lifetime
 

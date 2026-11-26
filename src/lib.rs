@@ -45,8 +45,8 @@ mod surfaces;
 
 pub use abi::{HostBridge, PluginVTable, RawBuffer, ABI_VERSION, LOG_ERROR, LOG_INFO, LOG_WARN};
 pub use surfaces::{
-    AppSurface, LogicalPoint, LogicalSize, PluginSummary, PluginsSurface, ShortcutsSurface,
-    WindowAnchor, WindowSurface,
+    AppSurface, CapabilitiesSurface, LogicalPoint, LogicalSize, PluginSummary, PluginsSurface,
+    ShortcutsSurface, WindowAnchor, WindowSurface,
 };
 
 use serde::{Deserialize, Serialize};
